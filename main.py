@@ -1,15 +1,23 @@
 import base64
 import json
+import time
 import shutil
 from pathlib import Path
 from enum import Enum
 
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import track
+from rich.table import Table
+
 import fitz
 from openai import OpenAI
 from pydantic import BaseModel, Field
+from pydantic import ValidationError
 from typing import Optional, List
 
 client = OpenAI()
+console = Console()
 
 SYSTEM_PROMPT = Path("prompts/invoice_extraction.txt").read_text(
     encoding="utf-8"
@@ -27,9 +35,6 @@ class PaymentMethod(str, Enum):
 class ServicePeriod(BaseModel):
     start_date: Optional[str] = None
     end_date: Optional[str] = None
-    start_month: Optional[str] = None
-    end_month: Optional[str] = None
-    raw_text: Optional[str] = None
 
 class InvoiceItem(BaseModel):
     number:             Optional[int]
@@ -37,7 +42,6 @@ class InvoiceItem(BaseModel):
     place_of_service:   Optional[str]
     service_periods:    List[ServicePeriod] = []
     quantity:           Optional[float]
-    unit:               Optional[str]
     unit_price:         Optional[float]
     net_amount:         Optional[float]
     vat_rate:           Optional[float]
@@ -47,7 +51,6 @@ class InvoiceItem(BaseModel):
 class InvoiceBase(BaseModel):
     number:             Optional[str]
     issue_date:         Optional[str]
-    sale_date:          Optional[str]
     service_periods:    List[ServicePeriod] = []
     place_of_service:   Optional[str]
     seller_name:        Optional[str]
@@ -89,7 +92,7 @@ def pdf_to_images(pdf_path: Path, out_dir: Path) -> list[Path]:
 def image_to_base64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("utf-8")
 
-def extract_invoice_from_images(image_paths: list[Path]) -> ReasonedInvoice:
+def extract_invoice_from_images(image_paths: list[Path]):
     content = [
         {
             "type": "input_text",
@@ -122,75 +125,208 @@ def extract_invoice_from_images(image_paths: list[Path]) -> ReasonedInvoice:
         text_format=ReasonedInvoice,
     )
 
-    return response.output_parsed
+    usage = {
+        "input_tokens": response.usage.input_tokens,
+        "output_tokens": response.usage.output_tokens,
+        "total_tokens": response.usage.total_tokens,
+    }
 
-
-# def validate_invoice(inv: ReasonedInvoice) -> list[str]:
-#     warnings = []
-
-#     for idx, item in enumerate(inv.items, start=1):
-#         if item.quantity and item.unit_price and item.net_amount:
-#             expected = round(item.quantity * item.unit_price, 2)
-#             actual = round(item.net_amount, 2)
-
-#             if abs(expected - actual) > 0.05:
-#                 warnings.append(
-#                     f"Item {idx}: quantity * unit_price != net_amount "
-#                     f"({expected} != {actual})"
-#                 )
-
-#         if item.net_amount is not None and item.vat_amount is not None and item.gross_amount is not None:
-#             expected = round(item.net_amount + item.vat_amount, 2)
-#             actual = round(item.gross_amount, 2)
-
-#             if abs(expected - actual) > 0.05:
-#                 warnings.append(
-#                     f"Item {idx}: net + vat != gross "
-#                     f"({expected} != {actual})"
-#                 )
-
-#         if item.confidence < 0.8:
-#             warnings.append(f"Item {idx}: low confidence")
-
-#     return warnings
+    return response.output_parsed, usage
 
 
 def main():
-    input_dir = Path("input")
-    output_dir = Path("output")
+    invoices_dir = Path("invoices")
+    inv_ctx_dir = Path("invoices_context")
     tmp_dir = Path("tmp")
 
-    output_dir.mkdir(exist_ok=True)
+    console.print(
+        Panel(
+f"""[bold]PDF Context Reasoning[/bold]
+
+[cyan]Parameters:[/cyan]
+• Invoices directory:   {invoices_dir}
+• Context directory:    {inv_ctx_dir}""",
+            title="Configuration",
+        )
+    )
+
+    console.print()
+
+    inv_ctx_dir.mkdir(exist_ok=True)
 
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
     tmp_dir.mkdir()
 
+    if not invoices_dir.exists():
+        console.print(
+            f"[red]✗ No invoices directory found: {invoices_dir}[/red]"
+        )
+        return
+
+    inv_files = list(invoices_dir.iterdir())
+
+    if any(
+        file.is_file() and file.suffix.lower() != ".pdf"
+        for file in inv_files
+    ):
+        console.print(
+            f"[red]✗ Directory contains non-PDF files[/red]"
+        )
+        return
+
+    if len(inv_files) == 0:
+        console.print(
+            f"[yellow]! Invoice directory is empty[/yellow]"
+        )
+        return
+
+    file_form = "file" if len(inv_files) == 1 else "files"
+    console.print(
+        f"[green]✓ Found {len(inv_files)} PDF {file_form}[/green]"
+    )
+
+    results = []
     try:
-        for pdf_path in input_dir.glob("*.pdf"):
-            print(f"Processing: {pdf_path.name}")
+        for pdf in track(
+            inv_files,
+            description="Processing invoices..."
+        ):
+            result = {
+                "file": pdf.name,
+                "status": None,
+                "error": None,
+                "time": None,
+                "tokens": None,
+            }
+            start = time.time()
 
-            image_paths = pdf_to_images(pdf_path, tmp_dir)
-            invoice = extract_invoice_from_images(image_paths)
-            # validation_warnings = validate_invoice(result)
+            try:
+                image_paths = pdf_to_images(pdf, tmp_dir)
+                invoice, usage = extract_invoice_from_images(image_paths)
+                result["tokens"] = usage
 
-            # print(json.dumps(invoice.model_dump(), ensure_ascii=False, indent=2))
+                output_path = inv_ctx_dir / f"{pdf.stem}.json"
 
-            output_path = output_dir / f"{pdf_path.stem}.json"
+                with open(output_path, "w", encoding="utf-8") as f:
+                    json.dump(invoice.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
 
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(invoice.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
+                result["status"] = "SUCCESS"
 
-            print(f"Output saved to: {output_path}")
+            except json.JSONDecodeError as e:
+                result["status"] = "FAILED"
+                result["error"] = (
+                    f"Invalid JSON response: {e.msg} "
+                    f"(line {e.lineno}, column {e.colno})"
+                )
 
-            # if validation_warnings:
-            #     print("\nVALIDATION WARNINGS:")
-            #     for w in validation_warnings:
-            #         print("-", w)
+
+            except ValidationError as e:
+                result["status"] = "FAILED"
+
+                errors = []
+
+                for error in e.errors():
+                    location = ".".join(
+                        str(x) for x in error["loc"]
+                    )
+                    errors.append(
+                        f"{location}: {error['msg']}"
+                    )
+
+                result["error"] = (
+                    "Schema validation failed: "
+                    + "; ".join(errors)
+                )
+
+
+            except FileNotFoundError as e:
+                result["status"] = "FAILED"
+                result["error"] = (
+                    f"File not found: {e.filename}"
+                )
+
+
+            except PermissionError as e:
+                result["status"] = "FAILED"
+                result["error"] = (
+                    f"Permission denied: {e.filename}"
+                )
+
+
+            except Exception as e:
+                result["status"] = "FAILED"
+                result["error"] = (
+                    f"Unexpected {type(e).__name__}: {str(e)}"
+                )
+
+            finally:
+                result["time"] = round(
+                    time.time() - start,
+                    2
+                )
+                results.append(result)
 
     finally:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir)
+
+    table = Table(
+        title="Processing Summary"
+    )
+
+    table.add_column("Invoice")
+    table.add_column("Status")
+    table.add_column("Time")
+    table.add_column("Tokens")
+    table.add_column("Error")
+
+    for r in results:
+        if r["status"] == "SUCCESS":
+            status = "[green]✓ SUCCESS[/green]"
+        else:
+            status = "[red]✗ FAILED[/red]"
+
+        tokens = "-"
+
+        if r["tokens"]:
+            tokens = (
+                f'{r["tokens"]["total_tokens"]} '
+                f'(↑{r["tokens"]["input_tokens"]} '
+                f'↓{r["tokens"]["output_tokens"]})'
+            )
+
+        table.add_row(
+            r["file"],
+            status,
+            f'{r["time"]}s',
+            tokens,
+            r["error"] or "-"
+        )
+
+    console.print()
+    console.print(table)
+    
+    failed = [
+        r for r in results
+        if r["status"] == "FAILED"
+    ]
+
+    if failed:
+        console.print(
+            Panel(
+                f"""[red]Failed invoices: {len(failed)}[/red]""",
+                title="Errors"
+            )
+        )
+
+    else:
+        console.print(
+            Panel(
+                "[green]All invoices processed successfully![/green]",
+                title="Done"
+            )
+        )
 
 if __name__ == "__main__":
     main()
