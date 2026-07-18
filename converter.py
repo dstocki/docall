@@ -2,17 +2,36 @@ import json
 import argparse
 from enum import Enum
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Tuple, Any
 
 from rich.panel import Panel
 from rich.console import Console
 from rich.progress import track
 from pathlib import Path
 
+from dataclasses import dataclass, field
+
 import openpyxl
 from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.cell.text import InlineFont
 from openpyxl.cell.rich_text import TextBlock, CellRichText
+
+@dataclass
+class GlobalValidationState:
+    invoice_numbers: List[str] = field(default_factory=list)
+    issue_min_year: int = 0
+    issue_max_year: int = 0
+    seller_name_lc: Optional[str] = None
+    sellet_tax_id: Optional[str] = None
+    currency: Optional[str] = None
+
+@dataclass
+class IndividualValidationState:
+    item_numbers: List[int] = field(default_factory=list)
+    sum_net: float = 0.0
+    sum_vat: float = 0.0
+    sum_gross: float = 0.0
+    vat_rate: Optional[float] = None
 
 class Currency(str, Enum):
     EUR = "EUR"
@@ -201,6 +220,84 @@ def generate_raport(output_path):
     wb.save(output_path)
     print(f"File '{output_path}' saved succesfully!")
 
+def read_context(context_dir: Path) -> Tuple[List[ReasonedInvoice], bool]:
+    invoices = []
+
+    if not context_dir.is_dir():
+        print(f"Directory '{context_dir}' does not exist!")
+        return [], False
+
+    for inv_path in context_dir.glob("*.json"):
+        try:
+            with open(inv_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+                invoice = ReasonedInvoice.model_validate_json(content)
+                invoices.append(invoice)
+                print(f"Succesfully loaded: {inv_path}")
+
+        except Exception as e:
+            print(f"Parsing from JSON failed with an error: {e}")
+            return [], False
+
+    return invoices, True
+
+def validate_context_file(
+    inv: ReasonedInvoice,
+    indi_data: IndividualValidationState
+) -> tuple[str, bool]:
+    for item in inv.items:
+        if item.number is not None:
+            if item.number in indi_data.item_numbers:
+                return f"duplicate item number: {item.number}", False
+            indi_data.item_numbers.append(item.number)
+
+        if indi_data.vat_rate is not None:
+            if item.vat_rate is not None and indi_data.vat_rate != item.vat_rate:
+                return f"item VAT rate mismatch: expected {indi_data.vat_rate}, got {item.vat_rate}", False
+        
+        expected_item_net = item.quantity * item.unit_price if item.quantity is not None and item.unit_price is not None else None
+        if expected_item_net is not None and item.net_amount is not None:
+            if abs(expected_item_net - item.net_amount) > 0.01:
+                return f"item net amount mismatch: expected {expected_item_net}, got {item.net_amount}", False
+
+        expected_item_vat = item.net_amount * item.vat_rate / 100 if item.net_amount is not None and item.vat_rate is not None else None
+        if expected_item_vat is not None and item.vat_amount is not None:
+            if abs(expected_item_vat - item.vat_amount) > 0.01:
+                return f"item VAT amount mismatch: expected {expected_item_vat}, got {item.vat_amount}", False
+
+        expected_item_gross = item.net_amount + item.vat_amount if item.net_amount is not None and item.vat_amount is not None else None
+        if expected_item_gross is not None and item.gross_amount is not None:
+            if abs(expected_item_gross - item.gross_amount) > 0.01:
+                return f"item gross amount mismatch: expected {expected_item_gross}, got {item.gross_amount}", False
+
+        indi_data.sum_net += item.net_amount if item.net_amount is not None else 0
+        indi_data.sum_vat += item.vat_amount if item.vat_amount is not None else 0
+        indi_data.sum_gross += item.gross_amount if item.gross_amount is not None else 0
+
+    if indi_data.sum_net != inv.total_net:
+        return f"total net amount mismatch: expected {indi_data.sum_net}, got {inv.total_net}", False
+
+    if indi_data.sum_vat != inv.total_vat:
+        return f"total VAT amount mismatch: expected {indi_data.sum_vat}, got {inv.total_vat}", False
+
+    if indi_data.sum_gross != inv.total_gross:
+        return f"total gross amount mismatch: expected {indi_data.sum_gross}, got {inv.total_gross}", False
+
+    return "", True
+
+
+def validate_context(context_files: List[ReasonedInvoice]) -> tuple[str, bool]:
+    global_state = GlobalValidationState()
+
+    for inv in context_files:
+        indi_state = IndividualValidationState()
+
+        msg, valid = validate_context_file(inv, indi_state)
+        if not valid:
+            return msg, False
+    return "", True
+
 def main():
     parser = argparse.ArgumentParser(
         description="XLSX Generator"
@@ -244,6 +341,21 @@ f"""[bold]XLSX Generator[/bold]
         print("Context directory is empty!")
         return
 
+    context_files, ok = read_context(context_dir)
+    if not ok:
+        print("Generation stopped.")
+        return
+
+    print(f"Reading successful. Context files: {len(context_files)}")
+    
+    msg, valid = validate_context(context_files)
+    if not valid:
+        print(f"Validation failed: {msg}")
+        return
+
+    print("Validation successful. Generating XLSX report...")
+
+    # data = transform_context(context_files)
     generate_raport(output_dir)
 
 if __name__ == "__main__":
