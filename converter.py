@@ -3,6 +3,7 @@ import argparse
 from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Optional, List, Tuple, Any
+from datetime import datetime
 
 from rich.panel import Panel
 from rich.console import Console
@@ -242,6 +243,42 @@ def read_context(context_dir: Path) -> Tuple[List[ReasonedInvoice], bool]:
 
     return invoices, True
 
+def split_date(date: str) -> tuple[bool, list[int]]:
+    try:
+        dt = datetime.strptime(date, "%d.%m.%Y")
+        return True, [dt.year, dt.month, dt.day]
+    except ValueError:
+        pass
+
+    try:
+        dt = datetime.strptime(date, "%m.%Y")
+        return True, [dt.year, dt.month]
+    except:
+        return False, []
+    
+def split_address(addr: str) -> tuple[bool, dict]:
+    try:
+        # example: Sigma 5/10, 59-697 Enelec, Poland
+        parts = [p.strip() for p in addr.split(',')]
+
+        if len(parts) != 3:
+            return False, {}
+        
+        street_part, postal_part, country = parts
+        street, number = street_part.rsplit(' ', 1)
+        code, city = postal_part.split(' ', 1)
+
+        return True, {
+            "street": street,
+            "number": number,
+            "code": code,
+            "city": city,
+            "country": country
+        }
+
+    except ValueError:
+        return False, {}
+
 def validate_context_file(
     inv: ReasonedInvoice,
     indi_data: IndividualValidationState
@@ -251,6 +288,24 @@ def validate_context_file(
             if item.number in indi_data.item_numbers:
                 return f"duplicate item number: {item.number}", False
             indi_data.item_numbers.append(item.number)
+
+        for serv_perds in item.service_periods:
+            if serv_perds.start_date is None and serv_perds.end_date is None:
+                continue
+            if serv_perds.start_date is None:
+                return f"no start date given", False
+            if serv_perds.end_date is None:
+                return f"no end date given", False
+            ok, start_split = split_date(serv_perds.start_date)
+            if not ok:
+                return f"incorrect date: {serv_perds.start_date}", False
+            ok, end_split = split_date(serv_perds.end_date)
+            if not ok:
+                return f"incorrect date: {serv_perds.end_date}", False
+            if len(start_split) != len(end_split):
+                return f"start and end date in different formats: {serv_perds.start_date}-{serv_perds.end_date}", False
+            if start_split > end_split:
+                return f"start date {serv_perds.start_date} is after end date {serv_perds.end_date}", False
 
         if indi_data.vat_rate is not None:
             if item.vat_rate is not None and indi_data.vat_rate != item.vat_rate:
@@ -293,9 +348,43 @@ def validate_context(context_files: List[ReasonedInvoice]) -> tuple[str, bool]:
     for inv in context_files:
         indi_state = IndividualValidationState()
 
+        if inv.number in global_state.invoice_numbers:
+            return f"duplicated invoice number: {inv.number}", False
+        global_state.invoice_numbers.append(inv.number)
+        
+        ok, parts = split_date(inv.issue_date)
+        if not ok:
+            return f"incorrect format of issue date {inv.issue_date}", False
+        
+        curr_year = parts[0]
+        global_state.issue_min_year = min(global_state.issue_min_year, curr_year)
+        global_state.issue_max_year = max(global_state.issue_max_year, curr_year)
+
+        if abs(global_state.issue_max_year - global_state.issue_min_year) > 1:
+            return f"invoices spread on more than 2 years", False
+        
+        for serv_perds in inv.service_periods:
+            if serv_perds.start_date is None and serv_perds.end_date is None:
+                continue
+            if serv_perds.start_date is None:
+                return f"no start date given", False
+            if serv_perds.end_date is None:
+                return f"no end date given", False
+            ok, start_split = split_date(serv_perds.start_date)
+            if not ok:
+                return f"incorrect date: {serv_perds.start_date}", False
+            ok, end_split = split_date(serv_perds.end_date)
+            if not ok:
+                return f"incorrect date: {serv_perds.end_date}", False
+            if len(start_split) != len(end_split):
+                return f"start and end date in different formats: {serv_perds.start_date}-{serv_perds.end_date}", False
+            if start_split > end_split:
+                return f"start date {serv_perds.start_date} is after end date {serv_perds.end_date}", False
+
         msg, valid = validate_context_file(inv, indi_state)
         if not valid:
             return msg, False
+        
     return "", True
 
 def main():
