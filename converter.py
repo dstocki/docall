@@ -22,9 +22,7 @@ class GlobalValidationState:
     invoice_numbers: List[str] = field(default_factory=list)
     issue_min_year: int = 0
     issue_max_year: int = 0
-    seller_name_lc: Optional[str] = None
-    sellet_tax_id: Optional[str] = None
-    currency: Optional[str] = None
+    seller_tax_id: Optional[str] = None
 
 @dataclass
 class IndividualValidationState:
@@ -33,6 +31,9 @@ class IndividualValidationState:
     sum_vat: float = 0.0
     sum_gross: float = 0.0
     vat_rate: Optional[float] = None
+
+# 17:30 - 20.07, 17:43
+# 18:30 - 22.07, 10:04
 
 class Currency(str, Enum):
     EUR = "EUR"
@@ -253,7 +254,7 @@ def split_date(date: str) -> tuple[bool, list[int]]:
     try:
         dt = datetime.strptime(date, "%m.%Y")
         return True, [dt.year, dt.month]
-    except:
+    except ValueError:
         return False, []
     
 def split_address(addr: str) -> tuple[bool, dict]:
@@ -284,11 +285,13 @@ def validate_context_file(
     indi_data: IndividualValidationState
 ) -> tuple[str, bool]:
     for item in inv.items:
+        # Sprawdzanie duplikatów numerów pozycji
         if item.number is not None:
             if item.number in indi_data.item_numbers:
                 return f"duplicate item number: {item.number}", False
             indi_data.item_numbers.append(item.number)
 
+        # Walidacja dat
         for serv_perds in item.service_periods:
             if serv_perds.start_date is None and serv_perds.end_date is None:
                 continue
@@ -296,47 +299,59 @@ def validate_context_file(
                 return f"no start date given", False
             if serv_perds.end_date is None:
                 return f"no end date given", False
+            
             ok, start_split = split_date(serv_perds.start_date)
             if not ok:
                 return f"incorrect date: {serv_perds.start_date}", False
+            
             ok, end_split = split_date(serv_perds.end_date)
             if not ok:
                 return f"incorrect date: {serv_perds.end_date}", False
+            
             if len(start_split) != len(end_split):
                 return f"start and end date in different formats: {serv_perds.start_date}-{serv_perds.end_date}", False
             if start_split > end_split:
                 return f"start date {serv_perds.start_date} is after end date {serv_perds.end_date}", False
 
-        if indi_data.vat_rate is not None:
-            if item.vat_rate is not None and indi_data.vat_rate != item.vat_rate:
-                return f"item VAT rate mismatch: expected {indi_data.vat_rate}, got {item.vat_rate}", False
+        # Wymuszenie identycznej stawki VAT dla całej faktury
+        if indi_data.vat_rate is None and item.vat_rate is not None:
+            indi_data.vat_rate = item.vat_rate
+        elif item.vat_rate is not None and indi_data.vat_rate != item.vat_rate:
+            return f"item VAT rate mismatch: expected {indi_data.vat_rate}, got {item.vat_rate}", False
         
-        expected_item_net = item.quantity * item.unit_price if item.quantity is not None and item.unit_price is not None else None
-        if expected_item_net is not None and item.net_amount is not None:
-            if abs(expected_item_net - item.net_amount) > 0.01:
+        # Walidacja kwot w pozycji (z dodanym zaokrągleniem do 2 miejsc po przecinku)
+        if item.quantity is not None and item.unit_price is not None:
+            expected_item_net = round(item.quantity * item.unit_price, 2)
+            if item.net_amount is not None and abs(expected_item_net - item.net_amount) > 0.01:
                 return f"item net amount mismatch: expected {expected_item_net}, got {item.net_amount}", False
 
-        expected_item_vat = item.net_amount * item.vat_rate / 100 if item.net_amount is not None and item.vat_rate is not None else None
-        if expected_item_vat is not None and item.vat_amount is not None:
-            if abs(expected_item_vat - item.vat_amount) > 0.01:
+        if item.net_amount is not None and item.vat_rate is not None:
+            expected_item_vat = round(item.net_amount * (item.vat_rate / 100.0), 2)
+            if item.vat_amount is not None and abs(expected_item_vat - item.vat_amount) > 0.01:
                 return f"item VAT amount mismatch: expected {expected_item_vat}, got {item.vat_amount}", False
 
-        expected_item_gross = item.net_amount + item.vat_amount if item.net_amount is not None and item.vat_amount is not None else None
-        if expected_item_gross is not None and item.gross_amount is not None:
-            if abs(expected_item_gross - item.gross_amount) > 0.01:
+        if item.net_amount is not None and item.vat_amount is not None:
+            expected_item_gross = round(item.net_amount + item.vat_amount, 2)
+            if item.gross_amount is not None and abs(expected_item_gross - item.gross_amount) > 0.01:
                 return f"item gross amount mismatch: expected {expected_item_gross}, got {item.gross_amount}", False
 
+        # Agregacja sum całkowitych
         indi_data.sum_net += item.net_amount if item.net_amount is not None else 0
         indi_data.sum_vat += item.vat_amount if item.vat_amount is not None else 0
         indi_data.sum_gross += item.gross_amount if item.gross_amount is not None else 0
 
-    if indi_data.sum_net != inv.total_net:
+    # Walidacja sum dla całej faktury (z dodanym zaokrągleniem, by uniknąć błędu dodawania floatów)
+    indi_data.sum_net = round(indi_data.sum_net, 2)
+    indi_data.sum_vat = round(indi_data.sum_vat, 2)
+    indi_data.sum_gross = round(indi_data.sum_gross, 2)
+
+    if abs(indi_data.sum_net - inv.total_net) > 0.01:
         return f"total net amount mismatch: expected {indi_data.sum_net}, got {inv.total_net}", False
 
-    if indi_data.sum_vat != inv.total_vat:
+    if abs(indi_data.sum_vat - inv.total_vat) > 0.01:
         return f"total VAT amount mismatch: expected {indi_data.sum_vat}, got {inv.total_vat}", False
 
-    if indi_data.sum_gross != inv.total_gross:
+    if abs(indi_data.sum_gross - inv.total_gross) > 0.01:
         return f"total gross amount mismatch: expected {indi_data.sum_gross}, got {inv.total_gross}", False
 
     return "", True
@@ -357,8 +372,13 @@ def validate_context(context_files: List[ReasonedInvoice]) -> tuple[str, bool]:
             return f"incorrect format of issue date {inv.issue_date}", False
         
         curr_year = parts[0]
-        global_state.issue_min_year = min(global_state.issue_min_year, curr_year)
-        global_state.issue_max_year = max(global_state.issue_max_year, curr_year)
+
+        if global_state.issue_max_year == 0:
+            global_state.issue_min_year = curr_year
+            global_state.issue_max_year = curr_year
+        else:
+            global_state.issue_min_year = min(global_state.issue_min_year, curr_year)
+            global_state.issue_max_year = max(global_state.issue_max_year, curr_year)
 
         if abs(global_state.issue_max_year - global_state.issue_min_year) > 1:
             return f"invoices spread on more than 2 years", False
@@ -380,6 +400,18 @@ def validate_context(context_files: List[ReasonedInvoice]) -> tuple[str, bool]:
                 return f"start and end date in different formats: {serv_perds.start_date}-{serv_perds.end_date}", False
             if start_split > end_split:
                 return f"start date {serv_perds.start_date} is after end date {serv_perds.end_date}", False
+
+        if not inv.currency:
+            return f"no currency outlined", False
+        
+        if not global_state.seller_tax_id:
+            global_state.seller_tax_id = inv.seller_tax_id
+        
+        if global_state.seller_tax_id != inv.seller_tax_id:
+            if not inv.seller_tax_id:
+                return f"seller tax id missing: {global_state.seller_tax_id}", False
+            else:
+                return f"different tax id, expected: {global_state.seller_tax_id}, actual: {inv.seller_tax_id}", False
 
         msg, valid = validate_context_file(inv, indi_state)
         if not valid:
