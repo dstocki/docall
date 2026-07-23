@@ -23,6 +23,25 @@ SYSTEM_PROMPT = Path("prompts/invoice_extraction.txt").read_text(
     encoding="utf-8"
 )
 
+# Adres w jezy ku kraju z ktorego pochodzi
+# Dokladniejsza ekstrakcja nazw
+# Usuwanie jakichs prefixow przy adresach typu str., ul. itd.
+# Dokladniejsza ekstrakcja ulic/separacja od imion
+# Nie uzywanie daty wykonania uslugi
+# Poprawienie logicznego rozumienia czym jest invoice item
+# Poprawa kodu pocztowego, moze 5 cyfr po prostu
+
+# 2
+# Dodatkowe slowka w nazwie ulicy
+# Lepsze wyciananie nazwy
+# Bank trasnfer na podstawie numeru konta, albo terminu platnosci, bo gotowka to odrazu
+
+# 3
+# Nazwa robot wygenerowana z merge'a
+# Zachowywanie literek w numerze budynku
+# Nie przerabiaj nazw miejscowosci nawet jesli wydaje sie ze jest zla
+# Format dat
+
 class Currency(str, Enum):
     EUR = "EUR"
     PLN = "PLN"
@@ -36,28 +55,30 @@ class ServicePeriod(BaseModel):
     start_date: Optional[str] = None
     end_date: Optional[str] = None
 
+class Address(BaseModel):
+    street:             Optional[str] = None
+    building_number:    Optional[str] = None
+    postal_code:        Optional[str] = None
+    city:               Optional[str] = None
+    country:            Optional[str] = None
+
 class InvoiceItem(BaseModel):
-    number:             Optional[int]
-    name_of_service:    Optional[str]
-    place_of_service:   Optional[str]
+    number:             Optional[int] = None
+    name_of_service:    Optional[str] = None
+    place_of_service:   Optional[Address] = None
     service_periods:    List[ServicePeriod] = []
-    quantity:           Optional[float]
-    unit_price:         Optional[float]
-    net_amount:         Optional[float]
-    vat_rate:           Optional[float]
-    vat_amount:         Optional[float]
-    gross_amount:       Optional[float]
+    net_amount:         Optional[float] = None
+    vat_amount:         Optional[float] = None
+    gross_amount:       Optional[float] = None
 
 class InvoiceBase(BaseModel):
     number:             Optional[str]
     issue_date:         Optional[str]
-    service_periods:    List[ServicePeriod] = []
-    place_of_service:   Optional[str]
     seller_name:        Optional[str]
-    seller_address:     Optional[str]
+    seller_address:     Optional[Address]
     seller_tax_id:      Optional[str]
     buyer_name:         Optional[str]
-    buyer_address:      Optional[str]
+    buyer_address:      Optional[Address]
     buyer_tax_id:       Optional[str]
     currency:           Optional[Currency]
     payment_method:     Optional[PaymentMethod]
@@ -98,7 +119,7 @@ def extract_invoice_from_images(image_paths: list[Path]):
             "type": "input_text",
             "text": (
                 "Extract invoice data from these invoice pages. "
-                "Return structured data only. One invoice line = one item."
+                "Return structured data only."
             ),
         }
     ]
