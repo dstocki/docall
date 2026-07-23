@@ -10,7 +10,7 @@ General rules:
 - Do not translate any text, except for the country name in addresses (which must always be in German).
 - Preserve the original language.
 - Preserve the original text, but normalize the casing to Title Case for street names, countries, and cities (e.g., WARSZAWA -> Warszawa, BRUKOWIECKA -> Brukowiecka).
-- Normalize city names to the official language of the country they belong to (e.g., WARSAW -> Warszawa, BRESLAU -> Wrocław, Drezno -> Dresden).
+- Normalize city names to the official language of the country they belong to (e.g., WARSAW -> Warszawa, BRESLAU -> Wrocław, Drezno -> Dresden). However, NEVER correct spelling mistakes or add missing diacritics/umlauts to words already written in the local language (e.g., keep "Bad Tolz" exactly as "Bad Tolz", do not change to "Bad Tölz").
 - Do not correct spelling mistakes that appear on the invoice.
 - Return only data matching the provided schema.
 - Extract logical deliverables, overarching services or projects as InvoiceItem objects, not strictly every single table row.
@@ -38,7 +38,7 @@ Rules for structured addresses:
 5. Building & Apartment Number: Format strictly as "<building_number>/<apartment_number>" (e.g., "3 m. 10" -> "3/10", "15 apt 2" -> "15/2"). Remove text labels like "m.", "mieszkanie", "lokal", "apt", "nr". If there is no apartment number, return ONLY the building number without any slashes (e.g., "44B", "2"). Preserve all aditional letters in the numbers (e.g., "12A/2", "1R/3"). Return null if completely missing.
 6. Postal code: Remove country prefixes attached to the code (e.g., remove "PL ", "D-", "DE "), but strictly preserve the local formatting rules (e.g., preserve the dash for Poland "52-416", use 5 contiguous digits for Germany "83098", or alphanumeric for UK). Also get rid of unnecessary whitespaces in the postal code.
 7. If any field (other than a deducible country) is missing, return null for that specific field.
-8. City field: Normalize the casing to Title Case. You MUST translate or normalize the city name to the official language of the country where it is located (e.g., WARSAW -> Warszawa, BRESLAU -> Wrocław, MUNICH -> München).
+8. City field: Normalize the casing to Title Case. Translate the city name to the official language of the country if it is written in a foreign language (e.g., WARSAW -> Warszawa, MUNICH -> München). DO NOT add missing umlauts, diacritics, or fix typos if the name is already in the local language (e.g., "Bad Tolz" MUST remain "Bad Tolz").
 
 Tax identification numbers:
 
@@ -69,15 +69,18 @@ Do not infer tax identifiers from company names or addresses.
 Invoice items:
 
 An `InvoiceItem` MUST be a physical service, manual labor, or specific work performed (e.g., Bauarbeiten, Fotovoltaik montieren, Malen, etc.). 
-Do NOT treat financial artifacts, auxiliary costs, or pure transport as separate items. Explicitly ignore table rows that represent:
+Do NOT treat financial artifacts, auxiliary costs, pure transport, or materials as separate items. Explicitly ignore table rows that represent:
 - Advance payments (e.g., Zaliczka, Vorauszahlung, Down payment)
 - Discounts (e.g., Rabat, Skonto, Rabatt)
 - Travel costs, transport, or mileage (e.g., Fahrtkosten, Transport, Anfahrt)
+- Material costs billed alongside a service (e.g., Materialkosten, Material, Baustoffe)
 
 How to extract and when to merge:
-1. DO NOT MERGE DISTINCT SERVICES: If the invoice lists several distinct services/works in separate rows, extract them as SEPARATE `InvoiceItem` objects. DO NOT merge them and DO NOT sum their costs into one item, even if they share the exact same place_of_service (BV) and service_periods.
-2. SINGLE OVERARCHING SERVICE (Materials/Sub-tasks): If the invoice rows only list various building materials, physical components, or sub-measurements (e.g., cables, screws, fiber optics) without a clear main service line, assume the entire invoice represents ONE single service performed at the general BV. In this case, extract EXACTLY ONE `InvoiceItem`. Infer a short (1-2 words) general service name (e.g., "Elektroinstallation", "Bauarbeiten") based on the materials or the company's profile. Use the invoice's total net, VAT, and gross amounts for this single item.
-3. MISPLACED METADATA: If a place of service (BV) or service period is mistakenly assigned to a non-service row (like "Zaliczka" or "Fahrtkosten"), do not create an item for it. Instead, assign that BV and date to the actual main service item(s) on the invoice.
+1. DO NOT MERGE DISTINCT SERVICES: If the invoice lists several distinct services/works in separate rows, extract them as SEPARATE `InvoiceItem` objects. Assign the specific line-item amounts to each.
+2. SINGLE OVERARCHING SERVICE: If the invoice lists a main service alongside auxiliary/material costs (e.g., Row 1: "Baudienst", Row 2: "Fahrtkosten") OR if it only lists various building materials without a clear main service line, assume the entire invoice represents ONE single overarching service. Extract EXACTLY ONE `InvoiceItem`. Name it based on the main service or infer a general name.
+3. CRITICAL RULE FOR AMOUNTS: Whenever an invoice is reduced to EXACTLY ONE InvoiceItem (because other rows were ignored or merged), you MUST assign the INVOICE'S GRAND TOTAL net, VAT, and gross amounts to this single item. Do NOT use the partial line-item amount.
+4. MISPLACED METADATA: If a place of service (BV) or service period is mistakenly assigned to a non-service row (like "Zaliczka" or "Materialkosten"), do not create an item for it. Instead, assign that BV and date to the actual main service item(s) on the invoice.
+5. STRICT DOUBT RULE: If you have any doubts about whether a table row is a distinct physical service or just a material/auxiliary cost, DO NOT extract it as a separate InvoiceItem. When in doubt, merge it into the overarching main service or ignore it.
 
 For every valid logical invoice item extract:
 - item number
@@ -92,17 +95,21 @@ Never perform mathematical calculations. Always read the final prices directly f
 
 Complex Table Interpretation (Few-Shot Examples):
 
-Scenario A (Financial Artifacts & Auxiliary Costs):
-Input: Row 1: "Prace murarskie". Row 2: "Fahrtkosten". Row 3: "Zaliczka". 
-Action: Ignore the "Fahrtkosten" and "Zaliczka" rows completely. Extract exactly ONE InvoiceItem ("Prace murarskie"). If a BV or date was written next to "Zaliczka" or "Fahrtkosten", assign it to the "Prace murarskie" item instead.
+Scenario A (Financial Artifacts & Auxiliary/Material Costs):
+Input: Row 1: "Baudienst" (net: 168). Row 2: "Fahrtkosten" (net: 74). Total invoice net: 242.
+Action: Ignore the "Fahrtkosten" row completely. Extract exactly ONE InvoiceItem ("Baudienst"). Apply the GRAND TOTAL invoice amounts (net: 242) to this single item. DO NOT just copy the partial 168. If a BV or date was written next to "Fahrtkosten", assign it to the "Baudienst" item.
 
 Scenario B (Single Project listed as materials/sub-tasks):
-Input: A top-level header "Bauvorhaben: Bad Tolz" and a table with rows detailing sub-tasks/materials like "Glasfasermuffen herstellen", "Glasfasern", "Kabel".
-Action: Treat the whole invoice as ONE service. Extract EXACTLY ONE InvoiceItem. Name it generally (e.g., "Glasfaserarbeiten"). Apply the total invoice amounts to this item and assign the "Bad Tolz" address.
+Input: A top-level header "Bauvorhaben: Bad Tolz" and a table with rows detailing sub-tasks/materials like "Glasfasermuffen herstellen", "Glasfasern".
+Action: Treat the whole invoice as ONE service. Extract EXACTLY ONE InvoiceItem. Name it generally (e.g., "Glasfaserarbeiten"). Apply the GRAND TOTAL invoice amounts to this item and assign the "Bad Tolz" address.
 
 Scenario C (Multiple Distinct Services at the same or different locations):
 Input: Row 1: "Malen", Row 2: "Putzen" (both at the same BV) OR Row 1: "Montaż - Adres A", Row 2: "Montaż - Adres B".
-Action: Extract separate InvoiceItem objects for each distinct service row. DO NOT merge them. Assign the respective BV, dates, and amounts to each individual item.
+Action: Extract separate InvoiceItem objects for each distinct service row. DO NOT merge them. Assign the respective specific line-item amounts, BV, and dates to each individual item.
+
+Scenario D (Financial Artifacts & Auxiliary/Material Costs):
+Input: Row 1: "Baudienst". Row 2: "Materialkosten". Row 3: "Zaliczka". 
+Action: Ignore the "Materialkosten" and "Zaliczka" rows completely as separate items. Extract exactly ONE InvoiceItem ("Baudienst"). Apply the TOTAL invoice amounts to this single item. If a BV or date was written next to "Zaliczka" or "Materialkosten", assign it to the "Baudienst" item instead.
 
 Place of service:
 

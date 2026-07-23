@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import track
 from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
 
 import fitz
 from openai import OpenAI
@@ -204,89 +205,111 @@ f"""[bold]PDF Context Reasoning[/bold]
 
     file_form = "file" if len(inv_files) == 1 else "files"
     console.print(
-        f"[green]✓ Found {len(inv_files)} PDF {file_form}[/green]"
+        f"[green]✓ Found {len(inv_files)} PDF {file_form}[/green]\n"
     )
 
     results = []
+    global_start = time.time()
+
     try:
-        for pdf in track(
-            inv_files,
-            description="Processing invoices..."
-        ):
-            result = {
-                "file": pdf.name,
-                "status": None,
-                "error": None,
-                "time": None,
-                "tokens": None,
-            }
-            start = time.time()
+        # Konfiguracja zaawansowanego paska postępu
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("•"),
+            TimeElapsedColumn(), # Całkowity czas od startu
+            TextColumn("•"),
+            TextColumn("[cyan]{task.fields[avg_time]}[/cyan]"), # Nasze własne pole ze średnią
+            console=console
+        ) as progress:
+            
+            task = progress.add_task(
+                "Processing invoices...", 
+                total=len(inv_files),
+                avg_time="Avg: -- s/inv"
+            )
 
-            try:
-                image_paths = pdf_to_images(pdf, tmp_dir)
-                invoice, usage = extract_invoice_from_images(image_paths)
-                result["tokens"] = usage
+            for i, pdf in enumerate(inv_files, start=1):
+                result = {
+                    "file": pdf.name,
+                    "status": None,
+                    "error": None,
+                    "time": None,
+                    "tokens": None,
+                }
+                item_start = time.time()
 
-                output_path = inv_ctx_dir / f"{pdf.stem}.json"
+                try:
+                    image_paths = pdf_to_images(pdf, tmp_dir)
+                    invoice, usage = extract_invoice_from_images(image_paths)
+                    result["tokens"] = usage
 
-                with open(output_path, "w", encoding="utf-8") as f:
-                    json.dump(invoice.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
+                    output_path = inv_ctx_dir / f"{pdf.stem}.json"
 
-                result["status"] = "SUCCESS"
+                    with open(output_path, "w", encoding="utf-8") as f:
+                        json.dump(invoice.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
 
-            except json.JSONDecodeError as e:
-                result["status"] = "FAILED"
-                result["error"] = (
-                    f"Invalid JSON response: {e.msg} "
-                    f"(line {e.lineno}, column {e.colno})"
-                )
+                    result["status"] = "SUCCESS"
 
-
-            except ValidationError as e:
-                result["status"] = "FAILED"
-
-                errors = []
-
-                for error in e.errors():
-                    location = ".".join(
-                        str(x) for x in error["loc"]
+                except json.JSONDecodeError as e:
+                    result["status"] = "FAILED"
+                    result["error"] = (
+                        f"Invalid JSON response: {e.msg} "
+                        f"(line {e.lineno}, column {e.colno})"
                     )
-                    errors.append(
-                        f"{location}: {error['msg']}"
+
+                except ValidationError as e:
+                    result["status"] = "FAILED"
+                    errors = []
+                    for error in e.errors():
+                        location = ".".join(
+                            str(x) for x in error["loc"]
+                        )
+                        errors.append(
+                            f"{location}: {error['msg']}"
+                        )
+
+                    result["error"] = (
+                        "Schema validation failed: "
+                        + "; ".join(errors)
                     )
 
-                result["error"] = (
-                    "Schema validation failed: "
-                    + "; ".join(errors)
-                )
+                except FileNotFoundError as e:
+                    result["status"] = "FAILED"
+                    result["error"] = (
+                        f"File not found: {e.filename}"
+                    )
 
+                except PermissionError as e:
+                    result["status"] = "FAILED"
+                    result["error"] = (
+                        f"Permission denied: {e.filename}"
+                    )
 
-            except FileNotFoundError as e:
-                result["status"] = "FAILED"
-                result["error"] = (
-                    f"File not found: {e.filename}"
-                )
+                except Exception as e:
+                    result["status"] = "FAILED"
+                    result["error"] = (
+                        f"Unexpected {type(e).__name__}: {str(e)}"
+                    )
 
+                finally:
+                    # Czas dla pojedynczej faktury
+                    item_time = time.time() - item_start
+                    result["time"] = round(item_time, 2)
+                    results.append(result)
 
-            except PermissionError as e:
-                result["status"] = "FAILED"
-                result["error"] = (
-                    f"Permission denied: {e.filename}"
-                )
+                    # Obliczanie średniego czasu po wykonaniu i-tej faktury
+                    total_elapsed = time.time() - global_start
+                    avg_time_val = total_elapsed / i
 
-
-            except Exception as e:
-                result["status"] = "FAILED"
-                result["error"] = (
-                    f"Unexpected {type(e).__name__}: {str(e)}"
-                )
-
-            finally:
-                result["time"] = round(
-                    time.time() - start,
-                    2
-                )
-                results.append(result)
+                    # Aktualizacja paska (przesunięcie o 1 do przodu i nadpisanie średniej)
+                    progress.update(
+                        task, 
+                        advance=1, 
+                        avg_time=f"Avg: {avg_time_val:.1f} s/inv"
+                    )
 
     finally:
         if tmp_dir.exists():
@@ -340,7 +363,6 @@ f"""[bold]PDF Context Reasoning[/bold]
                 title="Errors"
             )
         )
-
     else:
         console.print(
             Panel(
