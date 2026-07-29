@@ -57,6 +57,7 @@ class ServicePeriod(BaseModel):
     end_date: Optional[str] = None
 
 class Address(BaseModel):
+    annotation:         Optional[str] = None
     street:             Optional[str] = None
     building_number:    Optional[str] = None
     postal_code:        Optional[str] = None

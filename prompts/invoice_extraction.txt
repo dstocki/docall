@@ -18,6 +18,7 @@ General rules:
 - Return invoice dates in DD.MM.YYYY format.
 - Return service period full dates in DD.MM.YYYY format.
 - Return service period month-only values in MM.YYYY format.
+- Return service period calendar week (KW) values strictly in "KWxx" format (e.g., KW40).
 
 Additional documents and email correspondence:
 
@@ -29,16 +30,18 @@ If a field was completed or corrected using email correspondence or an additiona
 
 Addresses (seller_address, buyer_address, place_of_service):
 
-Whenever you extract an address, you must analyze and split it into the corresponding structured fields: street, building_number, postal_code, city, and country.
+Whenever you extract an address, you must analyze and split it into the corresponding structured fields: annotation, street, building_number, postal_code, city, and country.
 Rules for structured addresses:
 1. Country field: The country must ALWAYS be translated to and returned in German (e.g., "Deutschland", "Polen", "Großbritannien", "Niederlande", "Österreich"). Never return multiple interpretations.
 2. Inferring the country: If the country is not explicitly written, but you are certain which country it belongs to (e.g., based on the postal code format or city), you must infer it and translate it to German.
 3. Unknown country: If it cannot be clearly deduced, return null.
 4. Street name: Remove standalone address labels or prefixes/suffixes (e.g., "ul.", "ulica", detached "str."). Keep the core street name intact and normalize the casing to Title Case (e.g., BRUKOWIECKA -> Brukowiecka). For German addresses, keep "Straße", "strasse", or "str." ONLY if it is an integral part of the street's proper name (e.g., "Neue Straße", "Kraberstrasse", "Baustr."). If "str." stands alone purely as a label (e.g., "str. Kraber" or "Kraber str."), remove it.
 5. Building & Apartment Number: Format strictly as "<building_number>/<apartment_number>" (e.g., "3 m. 10" -> "3/10", "15 apt 2" -> "15/2"). Remove text labels like "m.", "mieszkanie", "lokal", "apt", "nr". If there is no apartment number, return ONLY the building number without any slashes (e.g., "44B", "2"). Preserve all aditional letters in the numbers (e.g., "12A/2", "1R/3"). Return null if completely missing.
-6. Postal code: Remove country prefixes attached to the code (e.g., remove "PL ", "D-", "DE "), but strictly preserve the local formatting rules (e.g., preserve the dash for Poland "52-416", use 5 contiguous digits for Germany "83098", or alphanumeric for UK). Also get rid of unnecessary whitespaces in the postal code.
+6. Postal code: Remove country prefixes attached to the code (e.g., remove "PL ", "D-", "DE "), but strictly preserve the local formatting rules (e.g., preserve the dash for Poland "52-416", use exactly 5 contiguous digits for Germany "83098", or alphanumeric for UK). Also get rid of unnecessary whitespaces in the postal code. If the extracted sequence does not logically match the standard postal code format for the deduced country (e.g., extracting 6 digits for Germany instead of exactly 5), you MUST return null. Do not force random numbers or internal codes into this field.
 7. If any field (other than a deducible country) is missing, return null for that specific field.
-8. City field: Normalize the casing to Title Case. Translate the city name to the official language of the country if it is written in a foreign language (e.g., WARSAW -> Warszawa, MUNICH -> München). DO NOT add missing umlauts, diacritics, or fix typos if the name is already in the local language (e.g., "Bad Tolz" MUST remain "Bad Tolz").
+8. City field: Normalize the casing to Title Case. Translate the city name to the official language of the country if it is written in a foreign language (e.g., WARSAW -> Warszawa, MUNICH -> München). DO NOT add missing umlauts, diacritics, or fix typos if the name is already in the local language (e.g., "Bad Tolz" MUST remain "Bad Tolz"). Preserve full compound or hyphenated city names exactly as they appear, including districts, suffixes, or additions (e.g., "Salzgitter-Bad", "Frankfurt am Main", "Halle (Saale)"). Do not truncate them to just the first word.
+9. Addresses without street names (Villages): If the address does not have a distinct street name and consists of the town/village name followed directly by the building number (e.g., "Libusza 790" along with postal code "38-306 Libusza"), you MUST use the town/village name as the `street` field. For example, extract: street="Libusza", building_number="790", postal_code="38-306", city="Libusza".
+10. Annotation: Extract specific facility names, building types, or location descriptors (e.g., "Gymnasium", "Krankenhaus", "Schule", "Sparkasse", "Halle 3") into the `annotation` field. This field is used to differentiate locations that might share the same physical address. Do NOT put personal names or standard company names here; focus purely on institutional names, facility types, or building descriptors. If no such descriptor is present, return null.
 
 Tax identification numbers:
 
@@ -126,16 +129,21 @@ To extract place_of_service:
 1. Identify the complete text describing the service location for the given item.
 2. Remove unnecessary information such as: person names, company names, service descriptions, project labels (such as BV or Bauvorhaben), payment information, and dates.
 3. Carefully distinguish personal names from address components. Do not treat given names or surnames as part of the street name.
-4. Parse the remaining text into the Address structure (street, building_number, postal_code, city, country).
+4. Parse the remaining text into the Address structure (annotation, street, building_number, postal_code, city, country).
 
 Examples for place_of_service mapping:
 Input: Thomas Weller - Baustr. 30 - 44789 Geber, putzen
 Output for the InvoiceItem:
-place_of_service: { "street": "Baustr.", "building_number": "30", "postal_code": "44789", "city": "Geber", "country": "Deutschland" }
+place_of_service: { "annotation": null, "street": "Baustr.", "building_number": "30", "postal_code": "44789", "city": "Geber", "country": "Deutschland" }
+
+Input: Krankenhaus - Neue Straße 13 - 57520 Kausen
+Output for the InvoiceItem:
+place_of_service: { "annotation": "Krankenhaus", "street": "Neue Straße", "building_number": "13", "postal_code": "57520", "city": "Kausen", "country": "Deutschland" }
 
 Service periods:
 
 The field `service_periods` inside each InvoiceItem contains all visible periods or dates when that specific service was performed. A single item can have multiple sets of dates.
+This is the ONLY place where calendar weeks (KW) should be extracted as dates.
 
 Where to look and assignment logic:
 Service periods can be found in non-standard places (e.g., Notes, remarks / Uwagi / Anmerkungen, headers, footers) or directly inside the invoice table.
@@ -145,30 +153,30 @@ Service periods can be found in non-standard places (e.g., Notes, remarks / Uwag
 FALLBACK RULE: Only if you cannot find any service periods in the item descriptions, notes, or remarks, you MUST look for a general service date applicable to the whole document (e.g., "Data wyk. usługi / dost. towaru", "Leistungsdatum"). Use this general date as a fallback and populate the `service_periods` for the item(s). Use this fallback ONLY if no other service period exists.
 
 Extract all visible service periods.
-Full dates must use DD.MM.YYYY format. Month-only periods must use MM.YYYY format.
+Full dates must use DD.MM.YYYY format. Month-only periods must use MM.YYYY format. Calendar weeks must use KWxx format.
 If a single full date is visible, return it as: start_date = that date, end_date = that date.
 If a full date range is visible, return: start_date = range start, end_date = range end.
-If a month-only period is visible, return: start_month = range start month, end_month = range end month.
+If a month-only period is visible, return: start_date = range start month, end_date = range end month.
+If a calendar week (Kalenderwoche / KW) or a range of weeks is visible, return: start_date = range start week (e.g., "KW30"), end_date = range end week (e.g., "KW46"). If it is a single week, use it for both (e.g., start_date = "KW40", end_date = "KW40").
 If a date is written without a year, infer the year from the invoice issue_date. If the inferred date would be later than the invoice issue_date, use the previous year.
 If no explicit service period or fallback is visible for the item, return an empty list.
 
 Service description:
 
 The field "name_of_service" should contain only the description of the performed work/actions.
-If the service description is written in multiple languages, extract only one language version.
-Prefer the German version if it is present. Do not concatenate multiple language versions.
-Do not include:
+If the service description is written in multiple languages, extract only one language version. Prefer the German version if it is present. Do not concatenate multiple language versions.
+If there are multiple distinct service descriptions that belong to one merged logical item, join them with a comma into a single text.
+You MUST NOT include:
 - customer names
 - company names
 - project names
 - Bauvorhaben / BV
-- addresses
+- addresses, cities, or zip codes
 - installation sites
-- service periods or service dates
+- service periods or service dates (like KW05)
 - payment information
 Those values belong to their dedicated fields.
-When separating service description from place_of_service, always prefer moving additional information into place_of_service.
-Only if separation is impossible, preserve the complete original text inside name_of_service.
+If there is absolutely no explicit text describing the performed work (e.g., the line contains ONLY an address, a date, or an internal code), do not invent a service name and do not use the address/date as the service name. In such cases, you MUST return null for `name_of_service`.
 
 Examples:
 Input: "Montaż instalacji fotowoltaicznej Weller, Thomas - Neue Straße 13 - 57520 Kausen"

@@ -1,6 +1,6 @@
 from collections import defaultdict
 from http import client
-import json
+import re
 import argparse
 from enum import Enum
 from main import Address, Currency, PaymentMethod, InvoiceItem, InvoiceBase, Invoice, ReasonedInvoice, ReasonedInvoiceItem
@@ -200,7 +200,15 @@ def split_date(date: str) -> tuple[bool, list[int]]:
         dt = datetime.strptime(date, "%m.%Y")
         return True, [dt.year, dt.month]
     except ValueError:
-        return False, []
+        pass
+    
+    kw_match = re.match(r"^KW(\d{1,2})$", date, re.IGNORECASE)
+    if kw_match:
+        kw_num = int(kw_match.group(1))
+        if 1 <= kw_num <= 53:
+            return True, [kw_num]
+            
+    return False, []
     
 def split_address(addr: str) -> tuple[bool, dict]:
     try:
@@ -221,6 +229,27 @@ def split_address(addr: str) -> tuple[bool, dict]:
         }
     except ValueError:
         return False, {}
+
+def parse_for_sorting(date_str: str, fallback_year: int) -> datetime:
+    if not date_str:
+        return datetime.max
+        
+    try:
+        return datetime.strptime(date_str, "%d.%m.%Y")
+    except ValueError:
+        pass
+        
+    try:
+        return datetime.strptime(date_str, "%m.%Y")
+    except ValueError:
+        pass
+        
+    kw_match = re.match(r"^KW(\d{1,2})$", date_str, re.IGNORECASE)
+    if kw_match:
+        kw = int(kw_match.group(1))
+        return datetime(fallback_year, 1, 1) + timedelta(weeks=kw - 1)
+        
+    return datetime.max
 
 def validate_context_file(
     inv: ReasonedInvoice,
@@ -261,12 +290,6 @@ def validate_context_file(
             break
         if item.place_of_service.city is None:
             err_msg = "item place of service city missing"
-            break
-        if not item.place_of_service.street and item.place_of_service.building_number:
-            err_msg = "item place of service street missing"
-            break
-        if item.place_of_service.street and not item.place_of_service.building_number:
-            err_msg = "item place of service building number missing"
             break
 
         # --- INVOICE ITEM SERVICE PERIODS ---
@@ -365,11 +388,14 @@ def format_address(addr) -> str:
     if addr is None:
         return ""
 
+    annotation = getattr(addr, 'annotation', None)
+    annotation_part = annotation.strip() if annotation else ""
+
     street_part = f"{addr.street or ''} {addr.building_number or ''}".strip()
     city_part = f"{addr.postal_code or ''} {addr.city or ''}".strip()
     country_part = addr.country or ""
     
-    parts = [p for p in [street_part, city_part, country_part] if p]
+    parts = [p for p in [annotation_part, street_part, city_part, country_part] if p]
     return ", ".join(parts)
 
 class ServiceSummary(BaseModel):
@@ -406,8 +432,11 @@ def merge_date_intervals(periods: List[dict]) -> str:
     if not periods:
         return ""
     
-    intervals = []
+    date_intervals = []
+    kw_intervals = []
     unparsed = set()
+    
+    kw_pattern = re.compile(r"^KW(\d{1,2})$", re.IGNORECASE)
     
     for period in periods:
         start_str = period.get("start")
@@ -416,6 +445,22 @@ def merge_date_intervals(periods: List[dict]) -> str:
         if not start_str:
             continue
             
+        kw_start_match = kw_pattern.match(start_str)
+        if kw_start_match:
+            start_kw = int(kw_start_match.group(1))
+            end_kw = start_kw
+            
+            if end_str:
+                kw_end_match = kw_pattern.match(end_str)
+                if kw_end_match:
+                    end_kw = int(kw_end_match.group(1))
+            
+            if end_kw < start_kw:
+                start_kw, end_kw = end_kw, start_kw
+                
+            kw_intervals.append([start_kw, end_kw])
+            continue
+
         try:
             start_dt = datetime.strptime(start_str, "%d.%m.%Y")
             end_dt = datetime.strptime(end_str, "%d.%m.%Y") if end_str else start_dt
@@ -423,36 +468,55 @@ def merge_date_intervals(periods: List[dict]) -> str:
             if end_dt < start_dt:
                 start_dt, end_dt = end_dt, start_dt
                 
-            intervals.append([start_dt, end_dt])
+            date_intervals.append([start_dt, end_dt])
         except ValueError:
             s = f"{start_str}-{end_str}" if end_str and start_str != end_str else start_str
             unparsed.add(s)
             
-    # Chronologiczne sortowanie po poprawnym zamienieniu na daty
-    intervals.sort(key=lambda x: x[0])
-    
-    merged = []
-    for current in intervals:
-        if not merged:
-            merged.append(current)
+    date_intervals.sort(key=lambda x: x[0])
+    merged_dates = []
+    for current in date_intervals:
+        if not merged_dates:
+            merged_dates.append(current)
         else:
-            last_start, last_end = merged[-1]
+            last_start, last_end = merged_dates[-1]
             current_start, current_end = current
             
-            # Łączymy jeśli nakładają się na siebie lub następują dzień po dniu
             if current_start <= last_end + timedelta(days=1):
-                merged[-1][1] = max(last_end, current_end)
+                merged_dates[-1][1] = max(last_end, current_end)
             else:
-                merged.append(current)
+                merged_dates.append(current)
+                
+    kw_intervals.sort(key=lambda x: x[0])
+    merged_kws = []
+    for current in kw_intervals:
+        if not merged_kws:
+            merged_kws.append(current)
+        else:
+            last_start, last_end = merged_kws[-1]
+            current_start, current_end = current
+            
+            if current_start <= last_end + 1:
+                merged_kws[-1][1] = max(last_end, current_end)
+            else:
+                merged_kws.append(current)
                 
     result_strings = []
-    for start, end in merged:
+    
+    for start, end in merged_dates:
         if start == end:
             result_strings.append(start.strftime("%d.%m.%Y"))
         else:
             result_strings.append(f"{start.strftime('%d.%m.%Y')}-{end.strftime('%d.%m.%Y')}")
             
+    for start, end in merged_kws:
+        if start == end:
+            result_strings.append(f"KW{start}")
+        else:
+            result_strings.append(f"KW{start}-KW{end}")
+            
     result_strings.extend(list(unparsed))
+    
     return ",\n".join(result_strings)
 
 def transform_context(context_files: List[ReasonedInvoice]) -> List[dict]:
@@ -472,6 +536,12 @@ def transform_context(context_files: List[ReasonedInvoice]) -> List[dict]:
 
         is_entrepreneur = "Ja" if inv.total_vat == 0.0 else "Nein"
 
+        inv_year = datetime.now().year
+        if inv.issue_date:
+            ok, parts = split_date(inv.issue_date)
+            if ok and len(parts) >= 1 and parts[0] > 1000:
+                inv_year = parts[0]
+
         for item in inv.items:
             bv_str = format_address(item.place_of_service)
             group_key = (buyer_name, bv_str)
@@ -486,7 +556,8 @@ def transform_context(context_files: List[ReasonedInvoice]) -> List[dict]:
                 for period in item.service_periods:
                     grouped_data[group_key]["periods"].append({
                         "start": period.start_date,
-                        "end": period.end_date
+                        "end": period.end_date,
+                        "inv_year": inv_year  # Przekazujemy rok wewnątrz obiektu okresu
                     })
 
             grouped_data[group_key]["buyer_full_address"] = buyer_full
@@ -506,6 +577,14 @@ def transform_context(context_files: List[ReasonedInvoice]) -> List[dict]:
         ai_summary = summarize_services_with_ai(data["services"])
         formatted_periods = merge_date_intervals(data["periods"])
 
+        earliest_date = datetime.max
+        for p in data["periods"]:
+            d = parse_for_sorting(p.get("start"), p.get("inv_year", 2000))
+            if d < earliest_date:
+                earliest_date = d
+                
+        period_count = len(data["periods"])
+
         row = {
             "service_name": ai_summary,
             "bv": bv_str,
@@ -513,10 +592,15 @@ def transform_context(context_files: List[ReasonedInvoice]) -> List[dict]:
             "payment_term": payment_term,
             "periods": formatted_periods,
             "b_name": data["buyer_full_address"],
-            "is_entrepreneur": data["is_entrepreneur"]
+            "is_entrepreneur": data["is_entrepreneur"],
+            # Ukryte klucze sortujące:
+            "_sort_date": earliest_date,
+            "_sort_count": period_count
         }
 
         trans_data.append(row)
+
+    trans_data.sort(key=lambda x: (x["_sort_date"], x["_sort_count"]))
 
     return trans_data
 
