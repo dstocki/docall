@@ -176,7 +176,7 @@ You MUST NOT include:
 - service periods or service dates (like KW05)
 - payment information
 Those values belong to their dedicated fields.
-If there is absolutely no explicit text describing the performed work (e.g., the line contains ONLY an address, a date, or an internal code), do not invent a service name and do not use the address/date as the service name. In such cases, you MUST return null for `name_of_service`.
+If there is absolutely no explicit text describing the performed work (e.g., the line contains ONLY an address, a date, or an internal code), do not invent a service name and do not use the address/date as the service name. In such cases, you MUST return "Bauarbeiten" for `name_of_service`.
 
 Examples:
 Input: "Montaż instalacji fotowoltaicznej Weller, Thomas - Neue Straße 13 - 57520 Kausen"
