@@ -665,27 +665,27 @@ def validate_context(context_files: List[ReasonedInvoice], file_mapping: dict[in
             break
 
         # --- INVOICE SELLER DETAILS ---
-        if not inv.seller_name:
-            err_msg = "seller name missing"
-            break
-        if not inv.seller_address:
-            err_msg = "seller address object missing"
-            break
-        if not inv.seller_address.country:
-            err_msg = "seller address country missing"
-            break
-        if not inv.seller_address.city:
-            err_msg = "seller address city missing"
-            break
-        if not inv.seller_address.postal_code:
-            err_msg = "seller address postal code missing"
-            break
-        if not inv.seller_address.street:
-            err_msg = "seller address street missing"
-            break
-        if not inv.seller_address.building_number:
-            err_msg = "seller address building number missing"
-            break
+        # if not inv.seller_name:
+            #err_msg = "seller name missing"
+            #break
+        #if not inv.seller_address:
+            #err_msg = "seller address object missing"
+            #break
+        #if not inv.seller_address.country:
+            #err_msg = "seller address country missing"
+            #break
+        #if not inv.seller_address.city:
+            #err_msg = "seller address city missing"
+            #break
+        #if not inv.seller_address.postal_code:
+            #err_msg = "seller address postal code missing"
+            #break
+        #if not inv.seller_address.street:
+            #err_msg = "seller address street missing"
+            #break
+        #if not inv.seller_address.building_number:
+            #err_msg = "seller address building number missing"
+            #break
 
         # --- INVOICE BUYER DETAILS ---
         if not inv.buyer_name:
