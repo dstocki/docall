@@ -738,12 +738,12 @@ def validate_context(context_files: List[ReasonedInvoice], file_mapping: dict[in
             err_msg = f"invoices spread on more than 2 different years"
             break
         
-        if not global_state.seller_name:
-            global_state.seller_name = inv.seller_name
+        # if not global_state.seller_name:
+        #     global_state.seller_name = inv.seller_name
         
-        if global_state.seller_name != inv.seller_name:
-            err_msg = f"seller name mismatch: expected {global_state.seller_name}, got {inv.seller_name}"
-            break
+        # if global_state.seller_name != inv.seller_name:
+        #     err_msg = f"seller name mismatch: expected {global_state.seller_name}, got {inv.seller_name}"
+        #     break
 
         msg, valid = validate_context_file(inv, indi_state)
         if not valid:
